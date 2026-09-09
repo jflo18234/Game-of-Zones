@@ -62,6 +62,63 @@ def save_posted_weeks(data):
 posted_weeks = load_posted_weeks()
 
 
+# --- Persisted all-time franchise records, used by the Achievements system ---
+ACHIEVEMENTS_FILE = "achievements_data.json"
+
+
+def load_achievements():
+    default = {
+        "high_score": {"team": None, "score": -1, "week": 0},
+        "low_score": {"team": None, "score": None, "week": 0},
+        "biggest_margin": {
+            "winner": None,
+            "loser": None,
+            "margin": -1,
+            "week": 0
+        },
+        "closest_game": {
+            "team1": None,
+            "team2": None,
+            "margin": None,
+            "week": 0
+        },
+        "longest_win_streak": {"team": None, "length": 0},
+        "longest_loss_streak": {"team": None, "length": 0},
+        "current_streaks": {},
+        "last_checked_week": 0
+    }
+
+    if os.path.exists(ACHIEVEMENTS_FILE):
+        with open(ACHIEVEMENTS_FILE, "r") as f:
+            saved = json.load(f)
+            default.update(saved)
+
+    return default
+
+
+def save_achievements(data):
+    with open(ACHIEVEMENTS_FILE, "w") as f:
+        json.dump(data, f)
+
+
+achievements_data = load_achievements()
+
+
+# --- Generic persisted set of "already posted" IDs, used by every ---
+# --- auto-checker (waivers, trades, news, live scores) so restarts ---
+# --- don't cause re-announcing things that already posted. ---
+def load_id_set(filename):
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_id_set(filename, id_set):
+    with open(filename, "w") as f:
+        json.dump(list(id_set), f)
+
+
 def get_json(url):
     with urllib.request.urlopen(url) as response:
         return json.loads(response.read().decode())
@@ -204,7 +261,7 @@ def get_nfl_games():
         print(f"NFL scoreboard error: {e}")
         return []
 
-reported_final_games = set()
+reported_final_games = load_id_set("reported_final_games.json")
 last_live_update = None
 
 
@@ -333,6 +390,7 @@ async def nfl_game_checker():
                 )
 
             reported_final_games.add(game_id)
+            save_id_set("reported_final_games.json", reported_final_games)
 
             print(
                 f"🏁 Final fantasy scores posted "
@@ -1744,6 +1802,256 @@ async def weekly_house():
         print(f"House of the Week error: {e}")
 
 
+@tasks.loop(
+    time=dt_time(
+        hour=12,
+        minute=25,
+        tzinfo=central
+    )
+)
+async def weekly_achievements():
+    try:
+        if datetime.now(central).weekday() != 1:
+            return
+
+        state_url = "https://api.sleeper.app/v1/state/nfl"
+        nfl_state = get_json(state_url)
+
+        current_week = int(nfl_state.get("week", 1))
+        completed_week = current_week - 1
+
+        if completed_week < 1:
+            return
+
+        if achievements_data.get("last_checked_week", 0) >= completed_week:
+            return
+
+        rosters_url = (
+            f"https://api.sleeper.app/v1/league/"
+            f"{LEAGUE_ID}/rosters"
+        )
+
+        users_url = (
+            f"https://api.sleeper.app/v1/league/"
+            f"{LEAGUE_ID}/users"
+        )
+
+        matchups_url = (
+            f"https://api.sleeper.app/v1/league/"
+            f"{LEAGUE_ID}/matchups/{completed_week}"
+        )
+
+        rosters = get_json(rosters_url)
+        users = get_json(users_url)
+        matchups = get_json(matchups_url)
+
+        user_names = {}
+
+        for user in users:
+            user_names[user["user_id"]] = (
+                user.get("metadata", {}).get("team_name")
+                or user.get(
+                    "display_name",
+                    "Unknown House"
+                )
+            )
+
+        roster_names = {}
+
+        for roster in rosters:
+            roster_id = roster.get("roster_id")
+            owner_id = roster.get("owner_id")
+
+            roster_names[roster_id] = user_names.get(
+                owner_id,
+                "Unknown House"
+            )
+
+        matchup_groups = {}
+
+        for matchup in matchups:
+            matchup_id = matchup.get("matchup_id")
+
+            if matchup_id is not None:
+                matchup_groups.setdefault(
+                    matchup_id,
+                    []
+                ).append(matchup)
+
+        announcements = []
+        streaks = achievements_data.setdefault("current_streaks", {})
+
+        for teams in matchup_groups.values():
+
+            if len(teams) < 2:
+                continue
+
+            team1 = teams[0]
+            team2 = teams[1]
+
+            roster1 = team1.get("roster_id")
+            roster2 = team2.get("roster_id")
+
+            name1 = roster_names.get(roster1, "Unknown House")
+            name2 = roster_names.get(roster2, "Unknown House")
+
+            score1 = team1.get("points", 0) or 0
+            score2 = team2.get("points", 0) or 0
+
+            for name, score in [(name1, score1), (name2, score2)]:
+
+                if score > achievements_data["high_score"]["score"]:
+                    achievements_data["high_score"] = {
+                        "team": name,
+                        "score": score,
+                        "week": completed_week
+                    }
+
+                    announcements.append(
+                        "👑 **NEW ALL-TIME HIGH SCORE!**\n"
+                        f"**{name}** just scored **{score:.2f}** "
+                        f"points in Week {completed_week} — the "
+                        "highest in Game of Zones history!"
+                    )
+
+                if (
+                    achievements_data["low_score"]["score"] is None
+                    or score < achievements_data["low_score"]["score"]
+                ):
+                    achievements_data["low_score"] = {
+                        "team": name,
+                        "score": score,
+                        "week": completed_week
+                    }
+
+                    announcements.append(
+                        "💀 **NEW ALL-TIME LOW SCORE!**\n"
+                        f"**{name}** managed only **{score:.2f}** "
+                        f"points in Week {completed_week} — a new "
+                        "low for the realm."
+                    )
+
+            margin = abs(score1 - score2)
+
+            if margin > achievements_data["biggest_margin"]["margin"]:
+                winner = name1 if score1 > score2 else name2
+                loser = name2 if score1 > score2 else name1
+
+                achievements_data["biggest_margin"] = {
+                    "winner": winner,
+                    "loser": loser,
+                    "margin": margin,
+                    "week": completed_week
+                }
+
+                announcements.append(
+                    "⚔️ **NEW BIGGEST VICTORY!**\n"
+                    f"**{winner}** crushed **{loser}** by "
+                    f"**{margin:.2f}** points in Week "
+                    f"{completed_week} — the largest margin "
+                    "ever recorded."
+                )
+
+            if (
+                achievements_data["closest_game"]["margin"] is None
+                or margin < achievements_data["closest_game"]["margin"]
+            ):
+                achievements_data["closest_game"] = {
+                    "team1": name1,
+                    "team2": name2,
+                    "margin": margin,
+                    "week": completed_week
+                }
+
+                announcements.append(
+                    "🤏 **NEW CLOSEST BATTLE!**\n"
+                    f"**{name1}** vs **{name2}** decided by "
+                    f"just **{margin:.2f}** points in Week "
+                    f"{completed_week} — the tightest game in "
+                    "league history."
+                )
+
+            for roster_id, team_score, opp_score, team_name in [
+                (roster1, score1, score2, name1),
+                (roster2, score2, score1, name2)
+            ]:
+                key = str(roster_id)
+                streaks.setdefault(key, {"wins": 0, "losses": 0})
+
+                if team_score > opp_score:
+                    streaks[key]["wins"] += 1
+                    streaks[key]["losses"] = 0
+
+                    if (
+                        streaks[key]["wins"]
+                        > achievements_data["longest_win_streak"]["length"]
+                    ):
+                        achievements_data["longest_win_streak"] = {
+                            "team": team_name,
+                            "length": streaks[key]["wins"]
+                        }
+
+                        announcements.append(
+                            "🔥 **NEW LONGEST WIN STREAK!**\n"
+                            f"**{team_name}** has now won "
+                            f"**{streaks[key]['wins']}** games in "
+                            "a row — a new franchise record."
+                        )
+
+                elif opp_score > team_score:
+                    streaks[key]["losses"] += 1
+                    streaks[key]["wins"] = 0
+
+                    if (
+                        streaks[key]["losses"]
+                        > achievements_data["longest_loss_streak"]["length"]
+                    ):
+                        achievements_data["longest_loss_streak"] = {
+                            "team": team_name,
+                            "length": streaks[key]["losses"]
+                        }
+
+                        announcements.append(
+                            "💀 **NEW LONGEST LOSING STREAK!**\n"
+                            f"**{team_name}** has now lost "
+                            f"**{streaks[key]['losses']}** games "
+                            "in a row — banished to the Wall."
+                        )
+
+        achievements_data["last_checked_week"] = completed_week
+        save_achievements(achievements_data)
+
+        if announcements:
+            message = (
+                "🏆 **GAME OF ZONES — ACHIEVEMENTS "
+                "UNLOCKED** 🏆\n\n"
+            )
+
+            message += "\n\n".join(announcements)
+
+            while len(message) > 2000:
+                split_at = message.rfind("\n\n", 0, 2000)
+
+                if split_at == -1:
+                    split_at = 2000
+
+                await send_to_channel(
+                    ACHIEVEMENTS_CHANNEL_ID,
+                    message[:split_at]
+                )
+
+                message = message[split_at:].lstrip()
+
+            await send_to_channel(ACHIEVEMENTS_CHANNEL_ID, message)
+
+        print(
+            f"🏆 Achievement check complete for "
+            f"Week {completed_week}."
+        )
+
+    except Exception as e:
+        print(f"Achievements error: {e}")
+
 
 @bot.event
 async def on_ready():
@@ -1791,6 +2099,9 @@ async def on_ready():
 
     if not weekly_house.is_running():
         weekly_house.start()
+
+    if not weekly_achievements.is_running():
+        weekly_achievements.start()
 
 if not TOKEN:
     raise RuntimeError(
@@ -1969,7 +2280,8 @@ async def command_menu(ctx):
         "📜 **RECORDS & STATS** 📜\n"
         "`!streaks` — View winning/losing streaks\n"
         "`!house` — View House statistics\n"
-        "`!records` — View league records\n\n"
+        "`!records` — View league records\n"
+        "`!achievements` — View the Hall of Achievements\n\n"
 
         "📋 **WAIVER WIRE**\n"
         "`!waivers` — View this week's waiver/FA moves\n\n"
@@ -2068,6 +2380,81 @@ async def power(ctx):
         print(f"Power rankings error: {e}")
         await ctx.send(
             "⚠️ The Maesters couldn't calculate the Power Rankings."
+        )
+
+
+@bot.command()
+async def achievements(ctx):
+    try:
+        hs = achievements_data.get("high_score", {})
+        ls = achievements_data.get("low_score", {})
+        bm = achievements_data.get("biggest_margin", {})
+        cg = achievements_data.get("closest_game", {})
+        lws = achievements_data.get("longest_win_streak", {})
+        lls = achievements_data.get("longest_loss_streak", {})
+
+        message = "🏆 **GAME OF ZONES — HALL OF ACHIEVEMENTS** 🏆\n\n"
+        has_any = False
+
+        if hs.get("team"):
+            has_any = True
+            message += (
+                "👑 **All-Time High Score**\n"
+                f"{hs['team']} — {hs['score']:.2f} pts "
+                f"(Week {hs['week']})\n\n"
+            )
+
+        if ls.get("team"):
+            has_any = True
+            message += (
+                "💀 **All-Time Low Score**\n"
+                f"{ls['team']} — {ls['score']:.2f} pts "
+                f"(Week {ls['week']})\n\n"
+            )
+
+        if bm.get("winner"):
+            has_any = True
+            message += (
+                "⚔️ **Biggest Victory**\n"
+                f"{bm['winner']} defeated {bm['loser']} by "
+                f"{bm['margin']:.2f} pts (Week {bm['week']})\n\n"
+            )
+
+        if cg.get("team1"):
+            has_any = True
+            message += (
+                "🤏 **Closest Battle**\n"
+                f"{cg['team1']} vs {cg['team2']} — "
+                f"{cg['margin']:.2f} pt margin "
+                f"(Week {cg['week']})\n\n"
+            )
+
+        if lws.get("team"):
+            has_any = True
+            message += (
+                "🔥 **Longest Win Streak**\n"
+                f"{lws['team']} — {lws['length']} games\n\n"
+            )
+
+        if lls.get("team"):
+            has_any = True
+            message += (
+                "💀 **Longest Losing Streak**\n"
+                f"{lls['team']} — {lls['length']} games\n\n"
+            )
+
+        if not has_any:
+            message += (
+                "⚔️ No achievements recorded yet — the realm "
+                "awaits its first legend."
+            )
+
+        await ctx.send(message)
+
+    except Exception as e:
+        print(f"Achievements command error: {e}")
+        await ctx.send(
+            "⚠️ I couldn't retrieve the Hall of Achievements."
         )
 
 
@@ -2198,7 +2585,7 @@ async def waivers(ctx, week: int = None):
         )
 
 
-reported_transactions = set()
+reported_transactions = load_id_set("reported_transactions.json")
 
 
 @tasks.loop(minutes=30)
@@ -2298,6 +2685,7 @@ async def waiver_checker():
             await send_to_channel(WAIVER_WIRE_CHANNEL_ID, message)
 
             reported_transactions.add(transaction_id)
+            save_id_set("reported_transactions.json", reported_transactions)
 
     except Exception as e:
         print(f"Waiver checker error: {e}")
@@ -2394,7 +2782,7 @@ async def trades(ctx, week: int = None):
         )
 
 
-reported_trades = set()
+reported_trades = load_id_set("reported_trades.json")
 
 
 @tasks.loop(minutes=30)
@@ -2458,6 +2846,7 @@ async def trade_checker():
             await send_to_channel(TRADE_BLOCK_CHANNEL_ID, message)
 
             reported_trades.add(transaction_id)
+            save_id_set("reported_trades.json", reported_trades)
 
     except Exception as e:
         print(f"Trade checker error: {e}")
