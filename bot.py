@@ -8,6 +8,12 @@ import json
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# All persisted tracking files (waivers, trades, achievements, etc.) are
+# saved here. Locally this is just the bot's own folder. On Railway, set
+# the DATA_DIR environment variable to your mounted volume's path (e.g.
+# /data) so this data survives redeploys.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+
 LEAGUE_ID = "1400359679598563328"
 
 STANDINGS_CHANNEL_ID = 1545160833594695811
@@ -44,7 +50,7 @@ bot = commands.Bot(
 )
 
 # --- Persisted "already posted" tracker (fixes daily_raven repeat-posting) ---
-POSTED_WEEKS_FILE = "posted_weeks.json"
+POSTED_WEEKS_FILE = os.path.join(DATA_DIR, "posted_weeks.json")
 
 
 def load_posted_weeks():
@@ -63,7 +69,7 @@ posted_weeks = load_posted_weeks()
 
 
 # --- Persisted all-time franchise records, used by the Achievements system ---
-ACHIEVEMENTS_FILE = "achievements_data.json"
+ACHIEVEMENTS_FILE = os.path.join(DATA_DIR, "achievements_data.json")
 
 
 def load_achievements():
@@ -261,7 +267,7 @@ def get_nfl_games():
         print(f"NFL scoreboard error: {e}")
         return []
 
-reported_final_games = load_id_set("reported_final_games.json")
+reported_final_games = load_id_set(os.path.join(DATA_DIR, "reported_final_games.json"))
 last_live_update = None
 
 
@@ -390,7 +396,7 @@ async def nfl_game_checker():
                 )
 
             reported_final_games.add(game_id)
-            save_id_set("reported_final_games.json", reported_final_games)
+            save_id_set(os.path.join(DATA_DIR, "reported_final_games.json"), reported_final_games)
 
             print(
                 f"🏁 Final fantasy scores posted "
@@ -2585,7 +2591,7 @@ async def waivers(ctx, week: int = None):
         )
 
 
-reported_transactions = load_id_set("reported_transactions.json")
+reported_transactions = load_id_set(os.path.join(DATA_DIR, "reported_transactions.json"))
 
 
 @tasks.loop(minutes=30)
@@ -2685,7 +2691,7 @@ async def waiver_checker():
             await send_to_channel(WAIVER_WIRE_CHANNEL_ID, message)
 
             reported_transactions.add(transaction_id)
-            save_id_set("reported_transactions.json", reported_transactions)
+            save_id_set(os.path.join(DATA_DIR, "reported_transactions.json"), reported_transactions)
 
     except Exception as e:
         print(f"Waiver checker error: {e}")
@@ -2782,7 +2788,7 @@ async def trades(ctx, week: int = None):
         )
 
 
-reported_trades = load_id_set("reported_trades.json")
+reported_trades = load_id_set(os.path.join(DATA_DIR, "reported_trades.json"))
 
 
 @tasks.loop(minutes=30)
@@ -2846,7 +2852,7 @@ async def trade_checker():
             await send_to_channel(TRADE_BLOCK_CHANNEL_ID, message)
 
             reported_trades.add(transaction_id)
-            save_id_set("reported_trades.json", reported_trades)
+            save_id_set(os.path.join(DATA_DIR, "reported_trades.json"), reported_trades)
 
     except Exception as e:
         print(f"Trade checker error: {e}")
